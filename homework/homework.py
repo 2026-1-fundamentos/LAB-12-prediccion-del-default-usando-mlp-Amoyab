@@ -96,3 +96,167 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import gzip
+import json
+import os
+import pickle
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+
+def clean_data(df):
+    df = df.copy()
+
+    if "default payment next month" in df.columns:
+        df = df.rename(columns={"default payment next month": "default"})
+
+    if "ID" in df.columns:
+        df = df.drop(columns=["ID"])
+
+    df = df.dropna()
+
+    if "EDUCATION" in df.columns and "MARRIAGE" in df.columns:
+        df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
+        df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
+
+    return df.reset_index(drop=True)
+
+
+def pregunta_01():
+    train_path = "files/input/train_data.csv.zip"
+    test_path = "files/input/test_data.csv.zip"
+    model_dir = "files/models"
+    output_dir = "files/output"
+
+    os.makedirs(model_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    train_df = clean_data(pd.read_csv(train_path))
+    test_df = clean_data(pd.read_csv(test_path))
+
+    x_train = train_df.drop(columns=["default"])
+    y_train = train_df["default"]
+    x_test = test_df.drop(columns=["default"])
+    y_test = test_df["default"]
+
+    categorical_features = [
+        "SEX",
+        "EDUCATION",
+        "MARRIAGE"
+    ]
+
+    numerical_features = [
+    col for col in x_train.columns
+    if col not in categorical_features
+    ]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "cat",
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                categorical_features,
+            ),
+            (
+                "scaler",
+                StandardScaler(),
+                numerical_features,
+            ),
+        ]
+    )
+
+    pipeline = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("select", SelectKBest(score_func=f_classif)),
+            ("pca", PCA()),
+            ("mlp", MLPClassifier(max_iter=15000, random_state=21)),
+        ]
+    )
+
+    param_grid = {
+        "pca__n_components":[None],
+        "select__k":[20],
+        "mlp__hidden_layer_sizes":[
+            (50,30,40,60)
+        ],
+        "mlp__alpha":[0.26],
+        "mlp__learning_rate_init":[0.001],
+    }
+
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+    )
+
+    grid_search.fit(x_train, y_train)
+
+    model_path = os.path.join(model_dir, "model.pkl.gz")
+    with gzip.open(model_path, "wb") as f:
+        pickle.dump(grid_search, f)
+
+    y_train_pred = grid_search.predict(x_train)
+    y_test_pred = grid_search.predict(x_test)
+
+    metrics = []
+
+    for dataset, y_true, y_pred in [
+        ("train", y_train, y_train_pred),
+        ("test", y_test, y_test_pred),
+    ]:
+        metrics.append(
+            {
+                "type": "metrics",
+                "dataset": dataset,
+                "precision": float(precision_score(y_true, y_pred)),
+                "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+                "recall": float(recall_score(y_true, y_pred)),
+                "f1_score": float(f1_score(y_true, y_pred)),
+            }
+        )
+
+    for dataset, y_true, y_pred in [
+        ("train", y_train, y_train_pred),
+        ("test", y_test, y_test_pred),
+    ]:
+        cm = confusion_matrix(y_true, y_pred)
+        metrics.append(
+            {
+                "type": "cm_matrix",
+                "dataset": dataset,
+                "true_0": {
+                    "predicted_0": int(cm[0, 0]),
+                    "predicted_1": int(cm[0, 1]),
+                },
+                "true_1": {
+                    "predicted_0": int(cm[1, 0]),
+                    "predicted_1": int(cm[1, 1]),
+                },
+            }
+        )
+
+    metrics_path = os.path.join(output_dir, "metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        for metric in metrics:
+            f.write(json.dumps(metric) + "\n")
+
+
+if __name__ == "__main__":
+    pregunta_01()
